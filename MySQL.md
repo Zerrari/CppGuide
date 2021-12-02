@@ -83,10 +83,56 @@ innodb有不同类型的页，存放记录行的页为**数据页**
 ### LRU链表
 
 `LRU`链表分为两个部分，一部分是`young`区域，存放着经常访问的数据页的控制块，
-一部分是`old`区域，存放访问频率不高的数据页的控制块
+一部分是`old`区域，存放访问频率不高的数据页的控制块。
 
 具体的换页策略如下：
-当`Buffer Pool`内无空闲页时，先将该页加入`old`区域，如果在一定时刻内被访问，则不会将该页移动到`young`区域，该参数为`innodb_old_blocks_time`,否则将该页移动到`young`区域，而对于`young`区域的节点，当再次被访问，并且处于`young`区域的后四分之一时，才会将该节点移动至`young`区域头部
+当`Buffer Pool`内无空闲页时，先将该页加入`old`区域，如果在一定时刻内被访问，则不会将该页移动到`young`区域，该参数为`innodb_old_blocks_time`,否则将该页移动到`young`区域，而对于`young`区域的节点，当再次被访问，并且处于`young`区域的后四分之一时，才会将该节点移动至`young`区域头部。
+
+## redo log
+
+为了减少从磁盘读取数据页的时间开销，通过将数据页缓存在`Buffer Pool`中，减少对磁盘的访问
+但是如果`Buffer Pool`的数据页经过了修改后，还没有被同步到磁盘上,
+此时如果出现崩溃或者断电的情况，会导致数据的丢失。
+
+为了能够从意外情况中恢复数据,通过`redo log` 记录下每次对数据库的修改，
+当出现数据意外丢失的情况后，根据`redo log`，重做对数据库的修改，就能将数据库恢复到丢失前的情况。
+
+为了解决写入磁盘过慢的问题，`redo log`记录在`redo log buffer`上，`redo log buffer` 分为不同的`block`,每次顺序写入，
+当前`block`写满后，就往下一个`block`写日志,
+`read log buffer`中的`buf_next_to_write`的变量来标记接下来要写入磁盘日志文件的位置，
+`buf_free`变量来标记接下来写入`read log buffer`的位置,
+`flushed_to_disk_lsn`变量来来标记接下来要写入磁盘日志文件的位置
+
+在一些情况下，会将内存中的`redo log`刷新到磁盘上的`redo log`文件,比如`redo log buffer`空间不足或事务提交时。
+`redo log`文件由若干个大小为512字节的`block`组成
+
+
+### LSN
+
+`Log Sequence Number`即日志序列号，用来记录写入的日志
+
+#### LSN in flush
+
+`flush`链表维护脏页的节点，每个节点维护两个有关`LSN`的变量，分别是
+`oldest_modification`和`newest_modification`，
+`oldest_modification`存储该页第一次被修改时，即成为脏页时的`LSN`值，
+当该页加入`flush`链表后，接下来每次对该页的修改，只会更新`newest_modification`的值为当前的`LSN`,
+所以`oldest_modification`存储着最初对该页的修改所产生`redo log`的`LSN`,
+`newest_modification`存储着最新的对该页的修改所产生`redo log`的`LSN`。
+每次向`flush`链表增加节点，都是从头部插入，所以头部存储的是最晚修改的数据页，
+尾部存储的是最早修改的数据页。
+
+#### checkpoint
+
+因为写入`redo log`文件是采用循环的方式，当写到文件结束，会回到文件开始继续写入，
+所以需要判断当前日志能否被重写，对于一部分`redo log`，它所对应修改的数据页，
+已经被刷新到磁盘了，即使崩溃，也不会导致数据丢失，这部分`redo log`保存的必要，
+所以可以被重用。
+
+通过维护`checkpoint_lsn`来表示当前日志文件中可以被覆盖的日志总量,
+检查当前`flush`链表中尾部节点的`oldest_modification`，
+所有`lsn`小于改值的`redo log`对应的脏页已经被刷新回磁盘了，
+将该值赋给`checkpoint_lsn`，在此之前的`redo log`都可以被重用
 
 ## 数据库的索引
 
